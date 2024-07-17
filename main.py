@@ -1,5 +1,3 @@
-##webinterface diango
-
 import types
 import requests
 import pandas as pd
