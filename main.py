@@ -1,3 +1,5 @@
+##webinterface diango
+
 import types
 import requests
 import pandas as pd
@@ -25,6 +27,7 @@ import os
 import configparser
 #import logging
 import ast
+from types import SimpleNamespace
 
 class MarketData:
     
@@ -1110,13 +1113,13 @@ class MarketData:
         return buf
     
 
-    def plot_sma_crossovers(self, symbol: str, start_date='2020-01-01', end_date=None):
+    def plot_sma_crossovers(self, symbol: str, start_date='2020-07-01', end_date=None):
 
         if end_date is None:
             data = yf.download(symbol, start=start_date)
         else:
             data = yf.download(symbol, start=start_date, end=end_date)
-  
+    
         data['SMA10'] = data['Close'].rolling(window=10).mean()
         data['SMA35'] = data['Close'].rolling(window=35).mean()
 
@@ -1126,15 +1129,37 @@ class MarketData:
         data['Position'] = data['Signal'].diff()
 
         plt.figure(figsize=(14, 7))
-        plt.plot(data['Close'], label=f'{symbol.split('-')[0].upper()} Close Price', alpha=0.5, color='blue')
+        plt.plot(data['Close'], label=f'{symbol.split("-")[0].upper()} Close Price', alpha=0.5, color='blue')
         plt.plot(data['SMA10'], label='10-Day SMA', alpha=0.75, color='orange')
         plt.plot(data['SMA35'], label='35-Day SMA', alpha=0.75, color='green')
 
-        plt.plot(data[data['Position'] == 1].index, data['SMA10'][data['Position'] == 1], '^', markersize=10, color='g', lw=0, label='Buy Signal')
-  
-        plt.plot(data[data['Position'] == -1].index, data['SMA10'][data['Position'] == -1], 'v', markersize=10, color='r', lw=0, label='Sell Signal')
+        buy_signals = data[data['Position'] == 1]
+        sell_signals = data[data['Position'] == -1]
 
-        plt.title(f'{symbol.split('-')[0].upper()} Price with SMA Crossovers')
+        plt.plot(buy_signals.index, data['SMA10'][buy_signals.index], '^', markersize=10, color='g', lw=0, label='Buy Signal')
+        plt.plot(sell_signals.index, data['SMA10'][sell_signals.index], 'v', markersize=10, color='r', lw=0, label='Sell Signal')
+
+        if not buy_signals.empty:
+            last_buy_date = buy_signals.index[-1]
+        else:
+            last_buy_date = None
+
+        if not sell_signals.empty:
+            last_sell_date = sell_signals.index[-1]
+        else:
+            last_sell_date = None
+
+        if last_buy_date is not None and (last_sell_date is None or last_buy_date > last_sell_date):
+            last_signal = 'Buy'
+            last_signal_date = last_buy_date
+        elif last_sell_date is not None and (last_buy_date is None or last_sell_date > last_buy_date):
+            last_signal = 'Sell'
+            last_signal_date = last_sell_date
+        else:
+            last_signal = 'No Signal'
+            last_signal_date = None
+
+        plt.title(f'{symbol.split("-")[0].upper()} Price with SMA Crossovers')
         plt.legend()
         #plt.show()
 
@@ -1142,8 +1167,10 @@ class MarketData:
         plt.savefig(buf, format='png')
         buf.seek(0)
         plt.close()
-        
-        return buf
+        print(last_signal)
+        print(last_signal_date)
+
+        return buf, last_signal, last_signal_date
 
 class Bot:
     
@@ -1154,7 +1181,14 @@ class Bot:
         self.market_data = MarketData(weektype=weektype, symbol=symbol, limit=limit, aggregate=aggregate)
         
         
-        self.tickers = ['BTC', 'ETH', 'DOGE', 'FET', 'VET', 'DIA', 'BONK', 'FLOKI']
+        symbols = ['BTC', 'ETH', 'DOGE', 'SOL', 'FET', 'VET', 'DIA', 'BONK', 'FLOKI']
+        self.tickers = [symbol + '-USD' for symbol in symbols]
+        self.last_signal = {ticker: {'signal': None, 'date': None} for ticker in self.tickers}
+        
+
+        #print(self.tickers)
+        
+
         self.fetched_above_threshold = {ticker: False for ticker in self.tickers}
         self.fetched_above_threshold['PiCycle'] = False 
         self.fetched_above_threshold['Fibbol'] = False 
@@ -1520,14 +1554,19 @@ class Bot:
         except ValueError as e:
             await self.bot.send_message(chat_id=chat_id, text=f"Sorry couldn't generate the CMF")
     
-    async def process_sma_crossover(self, message):
-        chat_id = message.chat.id
-        text = message.text.split()
-        symbol = text[1].upper() + '-USD' if len(text) > 1 else 'BTC-USD'
-        if not symbol.upper().endswith('-USD'):
-            symbol = f"{symbol.upper()}-USD"
+    async def process_sma_crossover(self, message=None, chat_id=None,):
+        if message and message.text:
+            if chat_id is None:
+                chat_id = message.chat.id
+            if message.text.endswith('-USD'):    
+                symbol=message.text
+            else:
+                text = message.text.split()
+                symbol = text[1].upper() + '-USD' if len(text) > 1 else 'BTC-USD'
+                if not symbol.upper().endswith('-USD'):
+                        symbol = f"{symbol.upper()}-USD"
         try:
-            photo_data = self.market_data.plot_sma_crossovers(symbol)
+            photo_data, buy, date = self.market_data.plot_sma_crossovers(symbol)
             await self.bot.send_photo(chat_id=chat_id, photo=photo_data)
         except ValueError as e:
             await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the sma crossover")
@@ -1558,6 +1597,7 @@ class Bot:
             
     ######################################################################################################################################
     async def periodic_task(self):
+        await self.some_function()
         while True:
             await asyncio.sleep(1800)  # Sleep for 30 minutes
             await self.some_function()
@@ -1600,9 +1640,13 @@ class Bot:
                     for chat_id in chat_ids:
                         await self.bot.send_message(chat_id=chat_id, text=f'Some error in the weekly update')
         
+
         for ticker in self.tickers:
-            
-            price = self.market_data.get_current_price(ticker)
+            for chat_id in chat_ids:
+                pass
+            symbol = ticker.replace('-USD','')
+            #print(symbol)
+            price = self.market_data.get_current_price(symbol)
             #print(price)
             if price < 0.1:  # Assuming tickers with prices less than .1 should have more decimals
                 formatted_price = f"{price:.6f}"
@@ -1611,9 +1655,9 @@ class Bot:
             ###Price alert################################################
             price_alert = 60000
             try:
-                if ticker == 'BTC' and price > price_alert and not self.fetched_above_threshold['BTC']:
-                    for chat_id in chat_ids:
-                        await self.bot.send_message(chat_id=chat_id, text=f"{ticker} alert going of: ${formatted_price}")
+                if ticker == 'BTC' and price > price_alert and not self.fetched_above_threshold['BTC']:\
+                    
+                    await self.bot.send_message(chat_id=master_id, text=f"{ticker} alert going of: ${formatted_price}")
                     self.fetched_above_threshold['BTC'] = True
                 
                 #else:
@@ -1629,80 +1673,104 @@ class Bot:
                 
                 
             ####pi cycle######
-            symbol='BTC'
-            pi_im, pi_dif = self.market_data.pi_cycle_plot(symbol)
-            pi_alert = 5000
+        symbol='BTC'
+        pi_im, pi_dif = self.market_data.pi_cycle_plot(symbol)
+        pi_alert = 5000
             
-            try:
-                if ticker == 'BTC' and pi_dif is not None and pi_dif < pi_alert and not self.fetched_above_threshold['PiCycle']:
-                    for chat_id in chat_ids:
-                        await self.bot.send_message(chat_id=chat_id, text=f'BTC Pi cycle going off')
-                    self.fetched_above_threshold['PiCycle'] = True
+        try:
+            if ticker == 'BTC' and pi_dif is not None and pi_dif < pi_alert and not self.fetched_above_threshold['PiCycle']:
+                for chat_id in chat_ids:
+                    await self.bot.send_message(chat_id=chat_id, text=f'BTC Pi cycle going off')
+                self.fetched_above_threshold['PiCycle'] = True
 
-                elif ticker == 'BTC' and pi_dif is not None and pi_dif >= pi_alert:
-                    self.fetched_above_threshold['PiCycle'] = False
+            elif ticker == 'BTC' and pi_dif is not None and pi_dif >= pi_alert:
+                self.fetched_above_threshold['PiCycle'] = False
 
                 
 
-            except ValueError as e:
-                await self.bot.send_message(chat_id=chat_id, text=f'Failed pi cycle')
+        except ValueError as e:
+            await self.bot.send_message(chat_id=chat_id, text=f'Failed pi cycle')
             
             
             #####fibbol, test if basisline is tested######
-            fibbol_im, fibbol_dif = self.market_data.plot_fibonacci_bollinger_bands()
-            try:
-                if fibbol_dif and not self.fetched_above_threshold['Fibbol']:
-                    for chat_id in chat_ids:
-                        await self.bot.send_message(chat_id=chat_id, text=f'BTC Fibbol going off')
-                        mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text='BTC')
-                        await self.process_fibonacci_bollinger_bands(mock_message)
-                    self.fetched_above_threshold['Fibbol'] = True
-                elif fibbol_dif is False:
-                    self.fetched_above_threshold['Fibbol'] = False
-            except ValueError as e:
+        fibbol_im, fibbol_dif = self.market_data.plot_fibonacci_bollinger_bands()
+        try:
+            if fibbol_dif and not self.fetched_above_threshold['Fibbol']:
                 for chat_id in chat_ids:
-                    await self.bot.send_message(chat_id=chat_id, text=f'Failed bol basis band')
+                    await self.bot.send_message(chat_id=chat_id, text=f'BTC Fibbol going off')
+                    mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text='BTC')
+                    await self.process_fibonacci_bollinger_bands(mock_message)
+                self.fetched_above_threshold['Fibbol'] = True
+            elif fibbol_dif is False:
+                self.fetched_above_threshold['Fibbol'] = False
+        except ValueError as e:
+            for chat_id in chat_ids:
+                await self.bot.send_message(chat_id=chat_id, text=f'Failed bol basis band')
                 
             ###########ris month##############
-            rsi_im, rsi_value = self.market_data.plot_btc_rsi_collinear()
+        rsi_im, rsi_value = self.market_data.plot_btc_rsi_collinear()
 
             # Define the thresholds
-            high_rsi_threshold = 80
-            low_rsi_threshold = 50
+        high_rsi_threshold = 80
+        low_rsi_threshold = 50
 
-            try:
+        try:
                 # Check if RSI is above the high threshold and not already fetched
-                if rsi_value >= high_rsi_threshold and not self.fetched_above_threshold['RSI_HIGH']:
-                    for chat_id in chat_ids:
-                        await self.bot.send_message(chat_id=chat_id, text='RSI is quite high')
-                        mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text='BTC')
-                        await self.process_rsi_monthly(mock_message)
-                    self.fetched_above_threshold['RSI_HIGH'] = True
-                    self.fetched_above_threshold['RSI_LOW'] = False  # Ensure RSI low flag is reset
+            if rsi_value >= high_rsi_threshold and not self.fetched_above_threshold['RSI_HIGH']:
+                for chat_id in chat_ids:
+                    await self.bot.send_message(chat_id=chat_id, text='RSI is quite high')
+                    mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text='BTC')
+                    await self.process_rsi_monthly(mock_message)
+                self.fetched_above_threshold['RSI_HIGH'] = True
+                self.fetched_above_threshold['RSI_LOW'] = False  # Ensure RSI low flag is reset
 
                 # Check if RSI is below the low threshold and not already fetched
-                elif rsi_value < low_rsi_threshold and not self.fetched_above_threshold['RSI_LOW']:
-                    for chat_id in chat_ids:
-                        await self.bot.send_message(chat_id=chat_id, text='RSI is quite low')
-                        mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text='BTC')
-                        await self.process_rsi_monthly(mock_message)
-                    self.fetched_above_threshold['RSI_LOW'] = True
-                    self.fetched_above_threshold['RSI_HIGH'] = False  # Ensure RSI high flag is reset
+            elif rsi_value < low_rsi_threshold and not self.fetched_above_threshold['RSI_LOW']:
+                for chat_id in chat_ids:
+                    await self.bot.send_message(chat_id=chat_id, text='RSI is quite low')
+                    mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text='BTC')
+                    await self.process_rsi_monthly(mock_message)
+                self.fetched_above_threshold['RSI_LOW'] = True
+                self.fetched_above_threshold['RSI_HIGH'] = False  # Ensure RSI high flag is reset
 
                 # Reset both flags if RSI is within thresholds
-                elif low_rsi_threshold <= rsi_value <= high_rsi_threshold:
-                    self.fetched_above_threshold['RSI_HIGH'] = False
-                    self.fetched_above_threshold['RSI_LOW'] = False
+            elif low_rsi_threshold <= rsi_value <= high_rsi_threshold:
+                self.fetched_above_threshold['RSI_HIGH'] = False
+                self.fetched_above_threshold['RSI_LOW'] = False
 
-            except ValueError as e:
-                for chat_id in chat_ids:
+        except ValueError as e:
+            for chat_id in chat_ids:
                     await self.bot.send_message(chat_id=chat_id, text='Failed to process RSI data')
 
             ##########sma crossover buy and sell#############
-
-
             
-                       
+        for ticker in self.tickers:
+            try:
+                photo, signal, signal_date = self.market_data.plot_sma_crossovers(ticker)
+                if signal in ['Buy', 'Sell']:
+                    if signal_date is not None:
+                        today = datetime.now().date()
+                        
+                        if (today - signal_date.date()).days <= 5:
+                            last_signal_info = self.last_signal.get(ticker, {'signal': None, 'date': None})
+                            if signal != last_signal_info['signal'] or last_signal_info['date'] != signal_date.date():
+                                self.last_signal[ticker] = {'signal': signal, 'date': signal_date.date()}
+                                
+                                if signal == 'Buy':
+                                    self.take_buy_action = True
+                                    for chat_id in chat_ids:
+                                        await self.bot.send_message(chat_id=chat_id, text=f'Buy signal {ticker} given on SMA crossover')
+                                        mock_message = SimpleNamespace(chat=SimpleNamespace(id=chat_id), text=ticker)
+                                        await self.process_sma_crossover(mock_message, chat_id)
+                                elif signal == 'Sell':
+                                    self.take_sell_action = True
+                                    for chat_id in chat_ids:
+                                        await self.bot.send_message(chat_id=chat_id, text=f'Sell signal {ticker} given on SMA crossover')
+                                        mock_message = SimpleNamespace(chat=SimpleNamespace(id=chat_id), text=ticker)
+                                        await self.process_sma_crossover(mock_message, chat_id)
+            except Exception as e:
+                print(f"Error processing {ticker}: {e}")
+
             
     async def start_polling(self):
         try:
