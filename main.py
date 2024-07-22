@@ -28,6 +28,9 @@ import configparser
 #import logging
 import ast
 from types import SimpleNamespace
+import ta
+
+symbols = ['BTC', 'ETH', 'DOGE', 'SOL', 'FET', 'VET', 'DIA', 'BONK', 'FLOKI', 'XRP', 'WIF', 'PONKE', 'PAAL', 'INJ', 'LINK', 'BOME', 'AVAX', 'AXS', 'FTM', 'PHA', 'MATIC', 'LTC', 'TRX', 'GRT', 'WOO', 'BNB', 'LRC', 'YFI', 'APE', 'SUSHI']
 
 class MarketData:
     
@@ -36,7 +39,6 @@ class MarketData:
         self.symbol = symbol
         self.limit = limit
         self.aggregate = aggregate
-        #self.api_key = api_key
         self.period = period
         self.api_key, self.token, self.ids = self.load_config(config_file)
         master_user = self.ids[0]
@@ -1172,6 +1174,104 @@ class MarketData:
 
         return buf, last_signal, last_signal_date
 
+   
+    def calculate_stoch(self, ticker, interval):
+        today = datetime.today()
+    
+        # Define the initial requested period in days
+        if interval == '1d':
+            requested_days = 300  # Approx. 1 year back
+        elif interval == '1wk':
+            requested_days = 365 * 1.5  # Approx. 1.5 years back
+        elif interval == '4h':
+            requested_days = 30  # Approx. 1 month back
+        else:
+            raise ValueError('Unsupported interval. Choose from "1d", "1wk", "4h".')
+        
+        def fetch_data(start_date):
+            try:
+                if interval == '4h':
+                    data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval='1h')
+                    data = data.resample('4h').agg({
+                        'Open': 'first',
+                        'High': 'max',
+                        'Low': 'min',
+                        'Close': 'last',
+                        'Volume': 'sum'
+                    }).dropna()
+                else:
+                    data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval=interval)
+                return data
+            except Exception as e:
+                print(f"Error fetching data: {e}")
+                return pd.DataFrame()  # Return empty DataFrame on error
+
+        # Attempt to fetch data with the maximum requested period
+        start_date = today - timedelta(days=requested_days)
+        data = fetch_data(start_date)
+        
+        # If data is not available, gradually reduce the start date
+        if data.empty:
+            for reduction_factor in [0.5, 0.25, 0.1]:
+                try:
+                    adjusted_days = int(requested_days * reduction_factor)
+                    print(f"Data not available for requested period. Trying with a shorter period ({adjusted_days} days).")
+                    start_date = today - timedelta(days=adjusted_days)
+                    data = fetch_data(start_date)
+                    if not data.empty:
+                        break
+                except Exception as e:
+                    print(f"Error during fallback data fetch: {e}")
+                    continue
+
+        # Final check if data is still empty
+        if data.empty:
+            raise ValueError(f'No price data found for {ticker}. Symbol may be delisted or not available for the specified interval.')
+
+        # Calculate %K and %D
+        stoch = ta.momentum.StochasticOscillator(
+            high=data['High'],
+            low=data['Low'],
+            close=data['Close'],
+            window=14,
+            smooth_window=3
+        )
+        data['%K'] = stoch.stoch()
+        data['%D'] = data['%K'].rolling(window=3).mean()
+
+        # Plot the data
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+
+        ax1.plot(data.index, data['Close'], label=f'{ticker} Price')
+        ax1.set_title(f'{ticker} Price Chart ({interval})')
+        ax1.set_ylabel('Price (USD)')
+        ax1.legend()
+        ax1.grid(True)
+
+        ax2.plot(data.index, data['%K'], label='%K')
+        ax2.plot(data.index, data['%D'], label='%D')
+        ax2.axhline(y=20, color='r', linestyle='--', label='Oversold (20)')
+        ax2.axhline(y=80, color='g', linestyle='--', label='Overbought (80)')
+        ax2.set_title('Stochastic Oscillator')
+        ax2.set_ylabel('Value')
+        ax2.legend()
+        ax2.grid(True)
+
+        plt.tight_layout()
+        buf = io.BytesIO() 
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+
+        # Get the latest %K value
+        latest_k_value = data['%K'].iloc[-1] if not data['%K'].empty else None
+        if latest_k_value is None:
+            raise ValueError(f'Unable to retrieve the latest %K value for {ticker}.')
+
+        return buf, latest_k_value
+           
+        
+
 class Bot:
     
     def __init__(self, user_id, token, weektype='day', symbol='BTC', limit=100, aggregate=1):
@@ -1179,10 +1279,12 @@ class Bot:
         self.bot = AsyncTeleBot(token=self.token)
         self.user_id = user_id
         self.market_data = MarketData(weektype=weektype, symbol=symbol, limit=limit, aggregate=aggregate)
+        fetch_symbols = False
         
-        
-        symbols = ['BTC', 'ETH', 'DOGE', 'SOL', 'FET', 'VET', 'DIA', 'BONK', 'FLOKI']
-        self.tickers = [symbol + '-USD' for symbol in symbols]
+         
+        if not fetch_symbols:
+            self.tickers = [symbol + '-USD' for symbol in symbols]
+            fetch_symbols = True
         self.last_signal = {ticker: {'signal': None, 'date': None} for ticker in self.tickers}
         
 
@@ -1194,7 +1296,7 @@ class Bot:
         self.fetched_above_threshold['Fibbol'] = False 
         self.fetched_above_threshold['RSI_HIGH'] = False
         self.fetched_above_threshold['RSI_LOW'] = False
-        
+        self.fetched_above_threshold['Stoch'] = False
         self.check = True
         
  
@@ -1289,6 +1391,10 @@ class Bot:
         @self.bot.message_handler(commands=['sma'])
         async def handle_sma_crossover(message):
             await self.process_sma_crossover(message)
+
+        @self.bot.message_handler(commands=['stoch'])
+        async def handle_stoch(message):
+            await self.process_stoch(message)
 
         @self.bot.message_handler(func=lambda message: True)
         async def handle_unknown(message):
@@ -1554,7 +1660,7 @@ class Bot:
         except ValueError as e:
             await self.bot.send_message(chat_id=chat_id, text=f"Sorry couldn't generate the CMF")
     
-    async def process_sma_crossover(self, message=None, chat_id=None,):
+    async def process_sma_crossover(self, message=None, chat_id=None):
         if message and message.text:
             if chat_id is None:
                 chat_id = message.chat.id
@@ -1570,6 +1676,33 @@ class Bot:
             await self.bot.send_photo(chat_id=chat_id, photo=photo_data)
         except ValueError as e:
             await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the sma crossover")
+
+
+    async def process_stoch(self, message=None, chat_id=None):
+        interval = '1d'
+        if message and message.text:
+            if chat_id is None:
+                chat_id = message.chat.id
+            if message.text.endswith('-USD'):    
+                    symbol=message.text
+            else:
+                text = message.text.split()
+                symbol = text[1].upper() + '-USD' if len(text) > 1 else 'BTC-USD'
+                if not symbol.upper().endswith('-USD'):
+                    symbol = f"{symbol.upper()}-USD"
+        
+                if len(text) > 2:
+                    interval = text[2].lower()
+                if interval not in ['1d', '4h', '1wk']:
+                    await self.bot.send_message(chat_id=chat_id, text="Invalid interval. Please use '1d', '4h', or '1w'.")
+
+        try:
+            photo_data, stoch_k = self.market_data.calculate_stoch(symbol, interval)
+            await self.bot.send_photo(chat_id=chat_id, photo=photo_data)
+        except ValueError as e:
+            await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the Stoch")
+
+
 
     async def process_everything(self, message):
         chat_id = message.chat.id
@@ -1593,11 +1726,12 @@ class Bot:
         await self.process_hash_ribbon(mock_message)   
         await self.process_cmf(mock_message)
         await self.process_sma_crossover(mock_message)
+        await self.process_stoch(mock_message)
             
             
     ######################################################################################################################################
     async def periodic_task(self):
-        await self.some_function()
+        #await self.some_function()
         while True:
             await asyncio.sleep(1800)  # Sleep for 30 minutes
             await self.some_function()
@@ -1609,8 +1743,8 @@ class Bot:
         master_id = market_data.ids[0]
         now = datetime.now()
         try:
-            if now.weekday()==4:
-                if now.hour==14 and self.check == True:
+            if now.weekday()==7:
+                if now.hour==19 and self.check == True:
                     for chat_id in chat_ids:
                         await self.bot.send_message(chat_id=chat_id, text=f'Time for ya Sunday evening update!')
                         mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text='BTC')
@@ -1632,7 +1766,8 @@ class Bot:
                         await self.process_sar(mock_message)
                         await self.process_hash_ribbon(mock_message)  
                         await self.process_cmf(mock_message)
-                        await self.process_sma_crossover(mock_message)               
+                        await self.process_sma_crossover(mock_message)
+                        await self.process_stoch(mock_message)               
                     self.check=False       
             else:
                 self.check=True
@@ -1742,8 +1877,25 @@ class Bot:
             for chat_id in chat_ids:
                     await self.bot.send_message(chat_id=chat_id, text='Failed to process RSI data')
 
-            ##########sma crossover buy and sell#############
-            
+           ############stoch buy oppurtunity###############
+        for ticker in self.tickers:
+                    try:
+                        interval = '1wk'
+                        photo, kdata = self.market_data.calculate_stoch(ticker, interval)
+                        if kdata <20 and not self.fetched_above_threshold['Stoch']:
+                            for chat_id in chat_ids:
+                                await self.bot.send_message(chat_id=chat_id, text=f'Weekly Stoch of {ticker} value <20')
+                                mock_message = SimpleNamespace(chat=SimpleNamespace(id=chat_id), text=ticker)
+                                await self.process_stoch(mock_message, chat_id)
+                                self.fetched_above_threshold['Stoch'] = True
+                            else:
+                                self.fetched_above_threshold['Stoch'] = False
+                        
+                    except Exception as e:
+                        for chat_id in chat_ids:
+                            print(f"Error processing stoch {ticker}: {e}")
+
+ ##########sma crossover buy and sell#############
         for ticker in self.tickers:
             try:
                 photo, signal, signal_date = self.market_data.plot_sma_crossovers(ticker)
@@ -1769,8 +1921,10 @@ class Bot:
                                         mock_message = SimpleNamespace(chat=SimpleNamespace(id=chat_id), text=ticker)
                                         await self.process_sma_crossover(mock_message, chat_id)
             except Exception as e:
-                print(f"Error processing {ticker}: {e}")
+                for chat_id in chat_ids:
+                    print(f"Error processing sma crossover{ticker}: {e}")
 
+            
             
     async def start_polling(self):
         try:
