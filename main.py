@@ -14,7 +14,7 @@ import mplfinance as mpf
 import io
 import numpy as np
 import matplotlib.pyplot as plt
-import mplfinance as mpf
+
 import yfinance as yf
 from mplfinance.original_flavor import candlestick_ohlc
 from pandas.tseries.offsets import DateOffset
@@ -22,7 +22,7 @@ from scipy.signal import argrelextrema
 import talib
 import asyncio
 from telebot.async_telebot import AsyncTeleBot
-from datetime import datetime
+
 import os
 import configparser
 #import logging
@@ -30,7 +30,6 @@ import ast
 from types import SimpleNamespace
 import ta
 
-symbols = ['BTC', 'ETH', 'DOGE', 'SOL', 'FET', 'VET', 'DIA', 'BONK', 'FLOKI', 'XRP', 'WIF', 'PONKE', 'PAAL', 'INJ', 'LINK', 'BOME', 'AVAX', 'AXS', 'FTM', 'PHA', 'MATIC', 'LTC', 'TRX', 'GRT', 'WOO', 'BNB', 'LRC', 'YFI', 'APE', 'SUSHI']
 
 class MarketData:
     
@@ -40,7 +39,7 @@ class MarketData:
         self.limit = limit
         self.aggregate = aggregate
         self.period = period
-        self.api_key, self.token, self.ids = self.load_config(config_file)
+        self.api_key, self.token, self.ids, self.symbols = self.load_config(config_file)
         master_user = self.ids[0]
 
     def load_config(self, config_file):
@@ -50,7 +49,8 @@ class MarketData:
         telegram_token = config.get('Credentials', 'telegram_token')
         identities = config.get('USER_ID', 'user_id')
         list_id = identities.strip("[]").replace("'", "").split(", ")
-        return api_key, telegram_token, list_id
+        symbols = config.get('Tokens', 'symbols').strip("[]").replace("'", "").split(", ")
+        return api_key, telegram_token, list_id, symbols
     
     def get_current_price(self, symbol='BTC'):
         try:
@@ -1178,7 +1178,6 @@ class MarketData:
     def calculate_stoch(self, ticker, interval):
         today = datetime.today()
     
-        # Define the initial requested period in days
         if interval == '1d':
             requested_days = 300  # Approx. 1 year back
         elif interval == '1wk':
@@ -1204,13 +1203,12 @@ class MarketData:
                 return data
             except Exception as e:
                 print(f"Error fetching data: {e}")
-                return pd.DataFrame()  # Return empty DataFrame on error
+                return pd.DataFrame()  
 
-        # Attempt to fetch data with the maximum requested period
+
         start_date = today - timedelta(days=requested_days)
         data = fetch_data(start_date)
-        
-        # If data is not available, gradually reduce the start date
+ 
         if data.empty:
             for reduction_factor in [0.5, 0.25, 0.1]:
                 try:
@@ -1224,11 +1222,9 @@ class MarketData:
                     print(f"Error during fallback data fetch: {e}")
                     continue
 
-        # Final check if data is still empty
         if data.empty:
             raise ValueError(f'No price data found for {ticker}. Symbol may be delisted or not available for the specified interval.')
 
-        # Calculate %K and %D
         stoch = ta.momentum.StochasticOscillator(
             high=data['High'],
             low=data['Low'],
@@ -1239,7 +1235,6 @@ class MarketData:
         data['%K'] = stoch.stoch()
         data['%D'] = data['%K'].rolling(window=3).mean()
 
-        # Plot the data
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
 
         ax1.plot(data.index, data['Close'], label=f'{ticker} Price')
@@ -1263,14 +1258,170 @@ class MarketData:
         buf.seek(0)
         plt.close()
 
-        # Get the latest %K value
+
         latest_k_value = data['%K'].iloc[-1] if not data['%K'].empty else None
         if latest_k_value is None:
             raise ValueError(f'Unable to retrieve the latest %K value for {ticker}.')
 
         return buf, latest_k_value
            
+    
+    def supertrend(self, ticker, interval, periods, atr_multipliers):
+
+        today = datetime.today()
+        if interval == '1d':
+            start_date = today - timedelta(days=365)
+        elif interval == '1wk':
+            start_date = today - timedelta(days=365 * 1.5)
+        elif interval == '4h':
+            start_date = today - timedelta(days=30)
+        else:
+            raise ValueError('Unsupported interval. Choose from "1d", "1wk", "4h".')
+
+        if interval == '4h':
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval='1h')
+            data = data.resample('4h').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+        else:
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval=interval)
+
+        fig, ax1 = plt.subplots(figsize=(14, 8))
+        ax1.plot(data.index, data['Close'], label=f'{ticker} Price')
         
+        colors = ['green', 'blue', 'orange', 'purple', 'brown']
+        for i, (period, atr_multiplier) in enumerate(zip(periods, atr_multipliers)):
+            source = (data["High"] + data["Low"]) / 2
+
+            atr = ta.volatility.AverageTrueRange(
+                high=data['High'], low=data['Low'], close=data['Close'], window=period
+            ).average_true_range()
+
+            up = source - (atr_multiplier * atr)
+            dn = source + (atr_multiplier * atr)
+
+            up_list = [up.iloc[0]]
+            dn_list = [dn.iloc[0]]
+            trend = 1
+            trend_list = [trend]
+
+            for j in range(1, len(data)):
+                if trend == 1:
+                    if data['Close'].iloc[j] > up_list[-1]:
+                        up_list.append(max(up_list[-1], up.iloc[j]))
+                        dn_list.append(np.nan)
+                    else:
+                        trend = -1
+                        dn_list.append(dn.iloc[j])
+                        up_list.append(np.nan)
+                else:
+                    if data['Close'].iloc[j] < dn_list[-1]:
+                        dn_list.append(min(dn_list[-1], dn.iloc[j]))
+                        up_list.append(np.nan)
+                    else:
+                        trend = 1
+                        up_list.append(up.iloc[j])
+                        dn_list.append(np.nan)
+                trend_list.append(trend)
+
+            supertrend_df = pd.DataFrame({
+                'uptrend': up_list,
+                'downtrend': dn_list,
+                'trend': trend_list
+            }, index=data.index)
+
+            ax1.plot(supertrend_df.index, supertrend_df['uptrend'], label=f'Uptrend P{period} M{atr_multiplier}', color=colors[i % len(colors)], linestyle='--')
+            ax1.plot(supertrend_df.index, supertrend_df['downtrend'], label=f'Downtrend P{period} M{atr_multiplier}', color='red')
+
+        ax1.set_title(f'{ticker} Price Chart ({interval}) with Multiple SuperTrend Indicators')
+        ax1.set_ylabel('Price (USD)')
+        ax1.legend()
+        ax1.grid(True)
+
+        plt.tight_layout()
+        #plt.show()
+   
+        buf = io.BytesIO() 
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+        return buf
+
+
+
+
+
+
+    def calculate_emas(self, ticker, interval):
+        ema_periods = [7, 30, 100, 200]
+
+        today = datetime.today()
+        if interval == '1d':
+            start_date = today - timedelta(days=365)
+        elif interval == '1wk':
+            start_date = today - timedelta(days=365 * 1.5)
+        elif interval == '4h':
+            start_date = today - timedelta(days=30)
+        else:
+            raise ValueError('Unsupported interval. Choose from "1d", "1wk", "4h".')
+
+        if interval == '4h':
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval='1h')
+            data = data.resample('4h').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+        else:
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval=interval)
+
+        for period in ema_periods:
+            data[f'EMA_{period}'] = data['Close'].ewm(span=period, adjust=False).mean()
+
+        upward_cross = False
+        downward_cross = False
+
+        # Check for crossover in the last 10 data points
+        if len(data) >= 2:
+            for i in range(-2, 0):
+                if data['EMA_7'].iloc[i] > data['EMA_30'].iloc[i] and data['EMA_7'].iloc[i-1] <= data['EMA_30'].iloc[i-1]:
+                    upward_cross = True
+                    break
+                elif data['EMA_7'].iloc[i] < data['EMA_30'].iloc[i] and data['EMA_7'].iloc[i-1] >= data['EMA_30'].iloc[i-1]:
+                    downward_cross = True
+                    break
+
+        fig, ax1 = plt.subplots(figsize=(14, 8))
+
+        ax1.plot(data.index, data['Close'], label=f'{ticker} Price', color='black')
+        ax1.plot(data.index, data['EMA_7'], label='EMA 7', color='green', linewidth=1)
+        ax1.plot(data.index, data['EMA_30'], label='EMA 30', color='blue', linewidth=2)
+        ax1.plot(data.index, data['EMA_100'], label='EMA 100', color='orange', linewidth=3)
+        ax1.plot(data.index, data['EMA_200'], label='EMA 200', color='red', linewidth=4)
+
+        ax1.set_title(f'{ticker} Price Chart ({interval}) with EMAs')
+        ax1.set_ylabel('Price (USD)')
+        ax1.legend()
+        ax1.grid(True)
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+        print(upward_cross)
+        print(downward_cross)
+
+        return buf, upward_cross, downward_cross
+
+
+
 
 class Bot:
     
@@ -1283,12 +1434,13 @@ class Bot:
         
          
         if not fetch_symbols:
-            self.tickers = [symbol + '-USD' for symbol in symbols]
+            self.tickers = [symbol + '-USD' for symbol in self.market_data.symbols]
             fetch_symbols = True
         self.last_signal = {ticker: {'signal': None, 'date': None} for ticker in self.tickers}
         
+        
 
-        #print(self.tickers)
+        print(self.tickers)
         
 
         self.fetched_above_threshold = {ticker: False for ticker in self.tickers}
@@ -1297,6 +1449,8 @@ class Bot:
         self.fetched_above_threshold['RSI_HIGH'] = False
         self.fetched_above_threshold['RSI_LOW'] = False
         self.fetched_above_threshold['Stoch'] = False
+        self.ema_buy_action = False
+        self.ema_sell_action = False
         self.check = True
         
  
@@ -1395,6 +1549,14 @@ class Bot:
         @self.bot.message_handler(commands=['stoch'])
         async def handle_stoch(message):
             await self.process_stoch(message)
+
+        @self.bot.message_handler(commands=['supertrend'])
+        async def handle_supertrend(message):
+            await self.process_supertrend(message)
+
+        @self.bot.message_handler(commands=['emas'])
+        async def handle_emas(message):
+            await self.process_emas(message)
 
         @self.bot.message_handler(func=lambda message: True)
         async def handle_unknown(message):
@@ -1694,19 +1856,58 @@ class Bot:
                 if len(text) > 2:
                     interval = text[2].lower()
                 if interval not in ['1d', '4h', '1wk']:
-                    await self.bot.send_message(chat_id=chat_id, text="Invalid interval. Please use '1d', '4h', or '1w'.")
+                    await self.bot.send_message(chat_id=chat_id, text="Invalid interval. Please use '1d', '4h', or '1wk'.")
+
+
+    async def process_supertrend(self, message=None):
+        chat_id = message.chat.id
+        interval = '1d'
+        periods = [10, 12] 
+        atr_multipliers = [1.0, 3.0]
+        text = message.text.split()
+        symbol = text[1].upper() + '-USD' if len(text) > 1 else 'BTC-USD'
+        if not symbol.upper().endswith('-USD'):
+            symbol = f"{symbol.upper()}-USD"
+        
+        if len(text) > 2:
+            interval = text[2].lower()
+        if interval not in ['1d', '4h', '1wk']:
+            await self.bot.send_message(chat_id=chat_id, text="Invalid interval. Please use '1d', '4h', or '1w'.")
 
         try:
-            photo_data, stoch_k = self.market_data.calculate_stoch(symbol, interval)
+            photo_data = self.market_data.supertrend(symbol, interval, periods, atr_multipliers)
             await self.bot.send_photo(chat_id=chat_id, photo=photo_data)
         except ValueError as e:
-            await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the Stoch")
+            await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the supertrend")
 
 
+    async def process_emas(self, message=None):
+        chat_id = message.chat.id
+        interval = '4h'
+        text = message.text.split()
+        symbol = text[1].upper() + '-USD' if len(text) > 1 else 'BTC-USD'
+        if not symbol.upper().endswith('-USD'):
+            symbol = f"{symbol.upper()}-USD"
+        
+        if len(text) > 2:
+            interval = text[2].lower()
+        if interval not in ['1d', '4h', '1wk']:
+            await self.bot.send_message(chat_id=chat_id, text="Invalid interval. Please use '1d', '4h', or '1w'.")
+
+        try:
+            photo_data, up, down = self.market_data.calculate_emas(symbol, interval)
+            await self.bot.send_photo(chat_id=chat_id, photo=photo_data)
+        except ValueError as e:
+            await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the emas")
+            
 
     async def process_everything(self, message):
         chat_id = message.chat.id
-        mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text='BTC')
+        text = message.text.split()
+        symbol = text[1].upper() + '-USD' if len(text) > 1 else 'BTC-USD'
+
+        mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text=symbol)
+        print(mock_message)
         await self.process_price_chart(mock_message)
         await self.process_bollinger_bands(mock_message)
         await self.process_daily_report(mock_message)
@@ -1714,8 +1915,9 @@ class Bot:
         await self.process_two_yma(mock_message)
         await self.process_twohundredweek_ma(mock_message)
         await self.process_twohundredday_ma(mock_message)
-        await self.process_madr(mock_message)
-        await self.process_smi(mock_message)
+        if symbol == 'BTC' or 'BTC-USD':
+            await self.process_madr(mock_message)
+            await self.process_smi(mock_message)
         await self.process_superguppy(mock_message)
         await self.process_bull_market_support_band(mock_message)
         await self.process_tenkanline(mock_message)
@@ -1727,11 +1929,12 @@ class Bot:
         await self.process_cmf(mock_message)
         await self.process_sma_crossover(mock_message)
         await self.process_stoch(mock_message)
-            
+        await self.process_supertrend(mock_message)  
+        await self.process_emas(mock_message)  
             
     ######################################################################################################################################
     async def periodic_task(self):
-        #await self.some_function()
+        await self.some_function()
         while True:
             await asyncio.sleep(1800)  # Sleep for 30 minutes
             await self.some_function()
@@ -1741,6 +1944,7 @@ class Bot:
         market_data = MarketData()
         chat_ids = market_data.ids
         master_id = market_data.ids[0]
+        second_id = market_data.ids[1]
         now = datetime.now()
         try:
             if now.weekday()==7:
@@ -1767,7 +1971,9 @@ class Bot:
                         await self.process_hash_ribbon(mock_message)  
                         await self.process_cmf(mock_message)
                         await self.process_sma_crossover(mock_message)
-                        await self.process_stoch(mock_message)               
+                        await self.process_stoch(mock_message)  
+                        await self.process_supertrend(mock_message)   
+                        await self.process_emas(mock_message)            
                     self.check=False       
             else:
                 self.check=True
@@ -1783,16 +1989,16 @@ class Bot:
             #print(symbol)
             price = self.market_data.get_current_price(symbol)
             #print(price)
-            if price < 0.1:  # Assuming tickers with prices less than .1 should have more decimals
-                formatted_price = f"{price:.6f}"
-            else:
-                formatted_price = f"{price:.2f}"
+            #if price < 0.1:  # Assuming tickers with prices less than .1 should have more decimals
+               # formatted_price = f"{price:.6f}"
+            #else:
+                #formatted_price = f"{price:.2f}"
             ###Price alert################################################
             price_alert = 60000
             try:
-                if ticker == 'BTC' and price > price_alert and not self.fetched_above_threshold['BTC']:\
+                if ticker == 'BTC' and price > price_alert and not self.fetched_above_threshold['BTC']:
                     
-                    await self.bot.send_message(chat_id=master_id, text=f"{ticker} alert going of: ${formatted_price}")
+                    await self.bot.send_message(chat_id=master_id, text=f"{ticker} alert going of: ${price}")
                     self.fetched_above_threshold['BTC'] = True
                 
                 #else:
@@ -1878,22 +2084,22 @@ class Bot:
                     await self.bot.send_message(chat_id=chat_id, text='Failed to process RSI data')
 
            ############stoch buy oppurtunity###############
-        for ticker in self.tickers:
-                    try:
-                        interval = '1wk'
-                        photo, kdata = self.market_data.calculate_stoch(ticker, interval)
-                        if kdata <20 and not self.fetched_above_threshold['Stoch']:
-                            for chat_id in chat_ids:
-                                await self.bot.send_message(chat_id=chat_id, text=f'Weekly Stoch of {ticker} value <20')
-                                mock_message = SimpleNamespace(chat=SimpleNamespace(id=chat_id), text=ticker)
-                                await self.process_stoch(mock_message, chat_id)
-                                self.fetched_above_threshold['Stoch'] = True
-                            else:
-                                self.fetched_above_threshold['Stoch'] = False
+        #for ticker in self.tickers[0]:
+                   # try:
+                     #   interval = '1wk'
+                       # photo, kdata = self.market_data.calculate_stoch(ticker, interval)
+                       # if kdata <20 and not self.fetched_above_threshold['Stoch']:
+                           # for chat_id in chat_ids:
+                               # await self.bot.send_message(chat_id=chat_id, text=f'Weekly Stoch of {ticker} value <20')
+                                #mock_message = SimpleNamespace(chat=SimpleNamespace(id=chat_id), text=ticker)
+                                #await self.process_stoch(mock_message, chat_id)
+                                #self.fetched_above_threshold['Stoch'] = True
+                          #  else:
+                                #self.fetched_above_threshold['Stoch'] = False
                         
-                    except Exception as e:
-                        for chat_id in chat_ids:
-                            print(f"Error processing stoch {ticker}: {e}")
+                   # except Exception as e:
+                       # for chat_id in chat_ids:
+                         #   print(f"Error processing stoch {ticker}: {e}")
 
  ##########sma crossover buy and sell#############
         for ticker in self.tickers:
@@ -1910,21 +2116,72 @@ class Bot:
                                 
                                 if signal == 'Buy':
                                     self.take_buy_action = True
-                                    for chat_id in chat_ids:
-                                        await self.bot.send_message(chat_id=chat_id, text=f'Buy signal {ticker} given on SMA crossover')
-                                        mock_message = SimpleNamespace(chat=SimpleNamespace(id=chat_id), text=ticker)
-                                        await self.process_sma_crossover(mock_message, chat_id)
+                                    
+                                    await self.bot.send_message(chat_id=master_id, text=f'Buy signal {ticker} given on SMA crossover')
+                                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
+                                    await self.process_sma_crossover(mock_message, master_id)
                                 elif signal == 'Sell':
                                     self.take_sell_action = True
-                                    for chat_id in chat_ids:
-                                        await self.bot.send_message(chat_id=chat_id, text=f'Sell signal {ticker} given on SMA crossover')
-                                        mock_message = SimpleNamespace(chat=SimpleNamespace(id=chat_id), text=ticker)
-                                        await self.process_sma_crossover(mock_message, chat_id)
+                                    
+                                    await self.bot.send_message(chat_id=master_id, text=f'Sell signal {ticker} given on SMA crossover')
+                                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
+                                    await self.process_sma_crossover(mock_message, chat_id)
             except Exception as e:
                 for chat_id in chat_ids:
                     print(f"Error processing sma crossover{ticker}: {e}")
 
+        for ticker in self.tickers[0:1]:
+            try:
+                photo, signal, signal_date = self.market_data.plot_sma_crossovers(ticker)
+                if signal in ['Buy', 'Sell']:
+                    if signal_date is not None:
+                        today = datetime.now().date()
+                        
+                        if (today - signal_date.date()).days <= 5:
+                            last_signal_info = self.last_signal.get(ticker, {'signal': None, 'date': None})
+                            if signal != last_signal_info['signal'] or last_signal_info['date'] != signal_date.date():
+                                self.last_signal[ticker] = {'signal': signal, 'date': signal_date.date()}
+                                
+                                if signal == 'Buy':
+                                    self.take_buy_action = True
+                                    
+                                    await self.bot.send_message(chat_id=second_id, text=f'Buy signal {ticker} given on SMA crossover')
+                                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=second_id), text=ticker)
+                                    await self.process_sma_crossover(mock_message, chat_id)
+                                elif signal == 'Sell':
+                                    self.take_sell_action = True
+                                    
+                                    await self.bot.send_message(chat_id=second_id, text=f'Sell signal {ticker} given on SMA crossover')
+                                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=second_id), text=ticker)
+                                    await self.process_sma_crossover(mock_message, chat_id)
+            except Exception as e:
+                for chat_id in chat_ids:
+                    print(f"Error processing sma crossover{ticker}: {e}")   
+
+        for ticker in self.tickers[0:8]:
+            try:
+                interval = '4h'
+                photo1, upwards, downwards  = self.market_data.calculate_emas(ticker, interval)
+
+                if upwards and not self.ema_buy_action:
+                    await self.bot.send_message(chat_id=master_id, text=f'Upwards trend detected on {ticker}')
+                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
+                    #await self.process_emas(mock_message, chat_id)
+                    self.ema_buy_action = True
+                    self.ema_sell_action = False
+
+                elif downwards and not self.ema_sell_action:
+                    await self.bot.send_message(chat_id=master_id, text=f'Downwards trend detected on {ticker}')
+                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
+                    #await self.process_emas(mock_message, chat_id)
+                    self.ema_sell_action = True
+                    self.ema_buy_action = False
+                
+            except Exception as e:
+                    for chat_id in chat_ids:
+                        print(f"Error processing ema crossover{ticker}: {e}")     
             
+
             
     async def start_polling(self):
         try:
