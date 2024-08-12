@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 #import telebot
 import pandas_ta as ta
+import pandas_ta as tk
 from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use('Agg')
@@ -1419,8 +1420,284 @@ class MarketData:
         print(downward_cross)
 
         return buf, upward_cross, downward_cross
+    
 
+    def detect_bearish_engulfing(self, ticker='BTC-USD', interval='1d', detection: str = None):
 
+        today = datetime.today()
+
+        if interval == '1d':
+            start_date = today - timedelta(days=365)
+        elif interval == '1wk':
+            start_date = today - timedelta(days=365 * 1.5)
+        elif interval == '4h':
+            start_date = today - timedelta(days=30)
+        else:
+            raise ValueError('Unsupported interval. Choose from "1d", "1wk", "4h".')
+
+        if interval == '4h':
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval='1h')
+            data = data.resample('4h').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+        else:
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval=interval)
+
+        if detection == "SMA50":
+            sma50 = pd.Series(data["Close"]).rolling(window=50).mean().values
+            up_trend = np.where(data["Close"].values > sma50, True, False)
+        elif detection == "SMA50/200":
+            sma50 = pd.Series(data["Close"]).rolling(window=50).mean().values
+            sma200 = pd.Series(data["Close"]).rolling(window=200).mean().values
+            up_trend = np.where(
+                (data["Close"].values > sma50) & (data["Close"].values > sma200),
+                True,
+                False,
+            )
+        else:
+            up_trend = np.full(len(data), True)
+
+        body_len = 14  
+
+        body_high = np.maximum(data["Close"].values, data["Open"].values)
+        body_low = np.minimum(data["Close"].values, data["Open"].values)
+        body = body_high - body_low
+
+        body_avg = pd.Series(body).ewm(span=body_len, adjust=False).mean().values
+        short_body = body < body_avg
+        long_body = body > body_avg
+
+        white_body = data["Open"].values < data["Close"].values
+        black_body = data["Open"].values > data["Close"].values
+
+        engulfing_bearish = [False]
+        for i in range(1, len(data)):
+            condition = (
+                up_trend[i]
+                & black_body[i]
+                & long_body[i]
+                & white_body[i - 1]
+                & short_body[i - 1]
+                & (data["Close"].values[i] <= data["Open"].values[i - 1])
+                & (data["Open"].values[i] >= data["Close"].values[i - 1])
+                & (
+                    (data["Close"].values[i] < data["Open"].values[i - 1])
+                    | (data["Open"].values[i] > data["Close"].values[i - 1])
+                )
+            )
+            engulfing_bearish.append(condition)
+
+        data['Bearish_Engulfing'] = engulfing_bearish
+
+        now_or_one_ago = np.any(data['Bearish_Engulfing'][-2:])
+        engulfing_dates = data[data['Bearish_Engulfing']].index
+        #print(f"Bearish Engulfing patterns detected for {ticker} on {interval} timeframe:\n", engulfing_dates)
+        #print(f"Bearish Engulfing signal is {'current or from the previous timeframe' if now_or_one_ago else 'not recent'}.")
+
+        fig, ax = plt.subplots(figsize=(14, 8))
+
+        ax.plot(data.index, data['Close'], label=f'{ticker} Close Price', color='black')
+
+        ax.plot(data.index[data['Bearish_Engulfing']], data['Close'][data['Bearish_Engulfing']], 
+                marker='o', linestyle='None', color='red', label='Bearish Engulfing')
+
+        ax.set_title(f'{ticker} Price with Bearish Engulfing Patterns ({interval} Timeframe)')
+        ax.set_ylabel('Price (USD)')
+        ax.set_xlabel('Date')
+        ax.legend()
+
+        plt.grid(True)
+        plt.show()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+
+        return buf, now_or_one_ago
+
+    def detect_bullish_engulfing(self, ticker='BTC-USD', interval='1d', detection: str = None):
+    
+        today = datetime.today()
+
+        if interval == '1d':
+            start_date = today - timedelta(days=365)
+        elif interval == '1wk':
+            start_date = today - timedelta(days=365 * 1.5)
+        elif interval == '4h':
+            start_date = today - timedelta(days=30)
+        else:
+            raise ValueError('Unsupported interval. Choose from "1d", "1wk", "4h".')
+
+        if interval == '4h':
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval='1h')
+            data = data.resample('4h').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+        else:
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval=interval)
+
+        if detection == "SMA50":
+            sma50 = pd.Series(data["Close"]).rolling(window=50).mean().values
+            down_trend = np.where(data["Close"].values < sma50, True, False)
+        elif detection == "SMA50/200":
+            sma50 = pd.Series(data["Close"]).rolling(window=50).mean().values
+            sma200 = pd.Series(data["Close"]).rolling(window=200).mean().values
+            down_trend = np.where(
+                (data["Close"].values < sma50) & (data["Close"].values < sma200),
+                True,
+                False,
+            )
+        else:
+            down_trend = np.full(len(data), True)
+
+        body_len = 14
+        body_high = np.maximum(data["Close"].values, data["Open"].values)
+        body_low = np.minimum(data["Close"].values, data["Open"].values)
+        body = body_high - body_low
+        body_avg = pd.Series(body).ewm(span=body_len, adjust=False).mean().values
+        short_body = body < body_avg
+        long_body = body > body_avg
+        white_body = data["Open"].values < data["Close"].values
+        black_body = data["Open"].values > data["Close"].values
+
+        engulfing_bullish = [False]
+        for i in range(1, len(data)):
+            condition = (
+                down_trend[i]
+                & white_body[i]
+                & long_body[i]
+                & black_body[i - 1]
+                & short_body[i - 1]
+                & (data["Close"].values[i] >= data["Open"].values[i - 1])
+                & (data["Open"].values[i] <= data["Close"].values[i - 1])
+                & (
+                    (data["Close"].values[i] > data["Open"].values[i - 1])
+                    | (data["Open"].values[i] < data["Close"].values[i - 1])
+                )
+            )
+            engulfing_bullish.append(condition)
+
+        data['Bullish_Engulfing'] = engulfing_bullish
+
+        now_or_one_ago = np.any(data['Bullish_Engulfing'][-2:])
+
+        engulfing_dates = data[data['Bullish_Engulfing']].index
+        #print(f"Bullish Engulfing patterns detected for {ticker} on {interval} timeframe:\n", engulfing_dates)
+        #print(f"Bullish Engulfing signal is {'current or from the previous timeframe' if now_or_one_ago else 'not recent'}.")
+
+        fig, ax = plt.subplots(figsize=(14, 8))
+
+        ax.plot(data.index, data['Close'], label=f'{ticker} Close Price', color='black')
+
+        ax.plot(engulfing_dates, data['Close'][data['Bullish_Engulfing']], 
+                marker='o', linestyle='None', color='green', label='Bullish Engulfing')
+
+        ax.set_title(f'{ticker} Price with Bullish Engulfing Patterns ({interval} Timeframe)')
+        ax.set_ylabel('Price (USD)')
+        ax.set_xlabel('Date')
+        ax.legend()
+
+        plt.grid(True)
+        plt.show()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+
+        return buf, now_or_one_ago
+    
+    def plot_rsi_fib_cross(self, btc_symbol='BTC-USD', start_date='2016-01-01'):
+       
+        btc_data = yf.download(btc_symbol, start=start_date, end=None, interval='1d')
+
+        # Resampling to 3-week periods
+        btc_3w = btc_data.resample('3W').agg({
+            'Open': 'first',
+            'High': 'max',
+            'Low': 'min',
+            'Close': 'last',
+            'Volume': 'sum'
+        })
+
+        # Calculating RSI on the resampled data using pandas_ta
+        rsi_3w = tk.rsi(btc_3w['Close'], length=14)
+
+        # Plotting the RSI with Reversed Fibonacci Channel
+        plt.figure(figsize=(12, 6))
+        plt.plot(rsi_3w, label='RSI', color='blue')
+
+        # Adding Reversed Fibonacci retracement levels to the RSI
+        low_rsi = rsi_3w.min()
+        high_rsi = rsi_3w.max()
+        diff_rsi = high_rsi - low_rsi
+
+        # Reversed Fibonacci levels (0% at the top, 100% at the bottom)
+        fib_levels = [0, 0.236, 0.382, 0.5, 0.618, 1]
+
+        # Initialize variables to store the last cross
+        last_cross_type = None
+        last_cross_level = None
+        last_cross_value = None
+        last_cross_date = None
+
+        for i in range(1, len(rsi_3w)):
+            for level in fib_levels:
+                # Reverse the level calculation
+                level_value = high_rsi - level * diff_rsi
+                plt.axhline(y=level_value, color='red', linestyle='--')
+                
+                # Adjusting the label position even further to the right
+                plt.text(rsi_3w.index[-1] + pd.Timedelta(weeks=6), level_value, f'{level*100:.1f}%', color='red', fontsize=12,
+                        verticalalignment='center', horizontalalignment='left', bbox=dict(facecolor='white', alpha=0.5))
+                
+                # Check for crossing up using iloc for positional indexing
+                if rsi_3w.iloc[i-1] < level_value and rsi_3w.iloc[i] >= level_value:
+                    last_cross_type = 'Up'
+                    last_cross_level = level
+                    last_cross_value = rsi_3w.iloc[i]
+                    last_cross_date = rsi_3w.index[i]
+                
+                # Check for crossing down using iloc for positional indexing
+                if rsi_3w.iloc[i-1] > level_value and rsi_3w.iloc[i] <= level_value:
+                    last_cross_type = 'Down'
+                    last_cross_level = level
+                    last_cross_value = rsi_3w.iloc[i]
+                    last_cross_date = rsi_3w.index[i]
+
+        # Check if the last cross happened within the last 3 weeks
+        recent_cross = False
+        if last_cross_date and (rsi_3w.index[-1] - last_cross_date).days <= 21:
+            recent_cross = True
+            cross_info = {
+                'type': last_cross_type,
+                'level': last_cross_level,
+                'value': last_cross_value,
+                'date': last_cross_date
+            }
+        else:
+            cross_info = None
+
+        plt.title('RSI with Reversed Fibonacci Channel (3-Week Period)')
+        plt.xlabel('Date')
+        plt.ylabel('RSI')
+        plt.legend()
+        plt.grid()
+
+        # Save the plot to a buffer
+        buf = io.BytesIO() 
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+
+        return buf, cross_info
 
 
 class Bot:
@@ -1452,6 +1729,9 @@ class Bot:
         self.ema_buy_action = False
         self.ema_sell_action = False
         self.check = True
+        self.bearish_engulf_action = False
+        self.bullish_engulf_action = False
+        self.fibrsi = False
         
  
         @self.bot.message_handler(commands=['start'])
@@ -1557,6 +1837,18 @@ class Bot:
         @self.bot.message_handler(commands=['emas'])
         async def handle_emas(message):
             await self.process_emas(message)
+
+        @self.bot.message_handler(commands=['bearish_engulf'])
+        async def handle_bearish_engulf(message):
+            await self.process_bearish_engulf(message)
+
+        @self.bot.message_handler(commands=['bullish_engulf'])
+        async def handle_bullish_engulf(message):
+            await self.process_bullish_engulf(message)
+
+        @self.bot.message_handler(commands=['3w_rsi'])
+        async def handle_3wrsi(message):
+            await self.process_3wrsi(message)
 
         @self.bot.message_handler(func=lambda message: True)
         async def handle_unknown(message):
@@ -1899,7 +2191,56 @@ class Bot:
             await self.bot.send_photo(chat_id=chat_id, photo=photo_data)
         except ValueError as e:
             await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the emas")
+
+    async def process_bearish_engulf(self, message=None):
+        chat_id = message.chat.id
+        interval = '1d'
+        detection="SMA50/200"
+        text = message.text.split()
+        symbol = text[1].upper() + '-USD' if len(text) > 1 else 'BTC-USD'
+        if not symbol.upper().endswith('-USD'):
+            symbol = f"{symbol.upper()}-USD"
+        
+        if len(text) > 2:
+            interval = text[2].lower()
+        if interval not in ['1d', '4h', '1wk']:
+            await self.bot.send_message(chat_id=chat_id, text="Invalid interval. Please use '1d', '4h', or '1w'.")
+
+        try:
+            photo_data, signal_bearish = self.market_data.detect_bearish_engulfing(symbol, interval, detection)
+            await self.bot.send_photo(chat_id=chat_id, photo=photo_data)
+        except ValueError as e:
+            await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the bearish_engulfing")
             
+
+    async def process_bullish_engulf(self, message=None):
+        chat_id = message.chat.id
+        interval = '1d'
+        detection="SMA50/200"
+        text = message.text.split()
+        symbol = text[1].upper() + '-USD' if len(text) > 1 else 'BTC-USD'
+        if not symbol.upper().endswith('-USD'):
+            symbol = f"{symbol.upper()}-USD"
+        
+        if len(text) > 2:
+            interval = text[2].lower()
+        if interval not in ['1d', '4h', '1wk']:
+            await self.bot.send_message(chat_id=chat_id, text="Invalid interval. Please use '1d', '4h', or '1w'.")
+
+        try:
+            photo_data, signal_bearish = self.market_data.detect_bullish_engulfing(symbol, interval, detection)
+            await self.bot.send_photo(chat_id=chat_id, photo=photo_data)
+        except ValueError as e:
+            await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the bullish_engulfing")
+
+
+    async def process_3wrsi(self, message):
+        chat_id = message.chat.id
+        try:
+            buf, cross_info = self.market_data.plot_rsi_fib_cross()
+            await self.bot.send_photo(chat_id=chat_id, photo=buf)
+        except ValueError as e:
+            await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the 3w rsi") 
 
     async def process_everything(self, message):
         chat_id = message.chat.id
@@ -1931,6 +2272,7 @@ class Bot:
         await self.process_stoch(mock_message)
         await self.process_supertrend(mock_message)  
         await self.process_emas(mock_message)  
+        await self.process_3wrsi(mock_message)
             
     ######################################################################################################################################
     async def periodic_task(self):
@@ -1947,10 +2289,11 @@ class Bot:
         second_id = market_data.ids[1]
         now = datetime.now()
         try:
-            if now.weekday()==7:
-                if now.hour==19 and self.check == True:
+            
+            if now.weekday()==6 or now.weekday == 2:
+                if now.hour==20 and self.check == True:
                     for chat_id in chat_ids:
-                        await self.bot.send_message(chat_id=chat_id, text=f'Time for ya Sunday evening update!')
+                        await self.bot.send_message(chat_id=chat_id, text=f'Time for ya Wednesday or Sunday evening update!')
                         mock_message = types.SimpleNamespace(chat=types.SimpleNamespace(id=chat_id), text='BTC')
                         await self.process_price_chart(mock_message)
                         await self.process_bollinger_bands(mock_message)
@@ -1973,7 +2316,9 @@ class Bot:
                         await self.process_sma_crossover(mock_message)
                         await self.process_stoch(mock_message)  
                         await self.process_supertrend(mock_message)   
-                        await self.process_emas(mock_message)            
+                        await self.process_emas(mock_message)   
+                        await self.process_3wrsi(mock_message)  
+                        print('weekly shit')       
                     self.check=False       
             else:
                 self.check=True
@@ -1981,7 +2326,6 @@ class Bot:
                     for chat_id in chat_ids:
                         await self.bot.send_message(chat_id=chat_id, text=f'Some error in the weekly update')
         
-
         for ticker in self.tickers:
             for chat_id in chat_ids:
                 pass
@@ -2158,7 +2502,7 @@ class Bot:
                 for chat_id in chat_ids:
                     print(f"Error processing sma crossover{ticker}: {e}")   
 
-        for ticker in self.tickers[0:8]:
+        for ticker in self.tickers[0:9]:
             try:
                 interval = '4h'
                 photo1, upwards, downwards  = self.market_data.calculate_emas(ticker, interval)
@@ -2180,9 +2524,57 @@ class Bot:
             except Exception as e:
                     for chat_id in chat_ids:
                         print(f"Error processing ema crossover{ticker}: {e}")     
-            
 
-            
+
+        for ticker in self.tickers[0:9]:
+            try:
+                interval = '1d'
+                detection="SMA50/200"
+                photodata, signal_bearish = self.market_data.detect_bearish_engulfing(ticker, interval, detection)
+
+                if signal_bearish and not self.bearish_engulf_action:
+                    
+                    await self.bot.send_message(chat_id=master_id, text=f'Bearish engulfing Sma Ema detected on {ticker}')
+                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
+                    self.bearish_engulf_action = True
+                elif not signal_bearish:
+                    self.bearish_engulf_action = False
+            except Exception as e:
+                    for chat_id in chat_ids:
+                        print(f"Error processing bearish engulfing {ticker}: {e}")   
+
+        try:
+            interval = '1d'
+            detection="SMA50/200"
+            ticker = 'BTC-USD'
+            photodata, signal_bullish = self.market_data.detect_bullish_engulfing(ticker, interval, detection)
+
+            if signal_bullish and not self.bullish_engulf_action:
+                await self.bot.send_message(chat_id=master_id, text=f'Bullish engulfing Sma Ema detected on {ticker}')
+                mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
+                self.bullish_engulf_action = True
+            elif not signal_bearish:
+                self.bullish_engulf_action = False
+        except Exception as e:
+                for chat_id in chat_ids:
+                    print(f"Error processing bearish engulfing {ticker}: {e}")   
+
+
+        try:
+            buf, cross_info = self.market_data.plot_rsi_fib_cross()
+            if cross_info and not self.fibrsi:
+                await self.bot.send_message(chat_id=master_id,text=f"Recent RSI cross: {cross_info['type']} at {cross_info['level']*100:.1f}% on {cross_info['date']} with RSI {cross_info['value']:.2f}")
+                mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
+                await self.process_3wrsi(mock_message)
+                self.fibrsi = True
+            elif not cross_info:
+                self.fibrsi = False
+            else:
+                print("No recent RSI cross detected.")
+        except Exception as e:
+                for chat_id in chat_ids:
+                    print(f"Error processing 3w rsi {ticker}: {e}")   
+
     async def start_polling(self):
         try:
             await self.bot.polling(none_stop=True, interval=0, timeout=20)
