@@ -10,10 +10,11 @@ from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import mplfinance as mpf
 import io
 import numpy as np
-import matplotlib.pyplot as plt
+
 
 import yfinance as yf
 from mplfinance.original_flavor import candlestick_ohlc
@@ -29,6 +30,7 @@ import configparser
 import ast
 from types import SimpleNamespace
 import ta
+from ta.momentum import RSIIndicator
 
 
 class MarketData:
@@ -39,7 +41,7 @@ class MarketData:
         self.limit = limit
         self.aggregate = aggregate
         self.period = period
-        self.api_key, self.token, self.ids, self.symbols = self.load_config(config_file)
+        self.api_key, self.token, self.ids, self.symbols, self.symbols2 = self.load_config(config_file)
         master_user = self.ids[0]
 
     def load_config(self, config_file):
@@ -50,7 +52,8 @@ class MarketData:
         identities = config.get('USER_ID', 'user_id')
         list_id = identities.strip("[]").replace("'", "").split(", ")
         symbols = config.get('Tokens', 'symbols').strip("[]").replace("'", "").split(", ")
-        return api_key, telegram_token, list_id, symbols
+        symbols2 = config.get('Tokens2', 'symbols2').strip("[]").replace("'", "").split(", ")
+        return api_key, telegram_token, list_id, symbols, symbols2
     
     def get_current_price(self, symbol='BTC'):
         try:
@@ -507,28 +510,10 @@ class MarketData:
         df['plusDev'] = df['stdCenter'] + df['std'] * no_std_dev
         df['minusDev'] = df['stdCenter'] - df['std'] * no_std_dev
 
-        top_2017 = df.loc['2017-12'].rate.idxmax()
-        top_2021 = df.loc['2021-01':'2021-12'].rate.idxmax()
-
-        top_2017_value = df.loc[top_2017].rate
-        top_2021_value = df.loc[top_2021].rate
-
-        slope = (top_2021_value - top_2017_value) / ((top_2021 - top_2017).days)
-        intercept = top_2017_value - slope * (top_2017 - df.index[0]).days
-
-        collinear_line = {date: slope * (date - df.index[0]).days + intercept for date in df.index}
-
-        latest_date = df.index[-1]
-        latest_deviation_rate = df.loc[latest_date, 'rate']
-        collinear_value = collinear_line[latest_date]
-        difference = abs(latest_deviation_rate - collinear_value)
-
-        print(f"Difference between deviation rate and collinear line at the latest date: {difference:.1f}")
-
         plt.figure(figsize=(14, 10))
         plt.subplot(2, 1, 1)
         plt.plot(df.index, df['Close'], label='Close', color='blue')
-        plt.plot(df.index, df['SMA'], label='21-SMA', color='orange')
+        plt.plot(df.index, df['SMA'], label='{}-SMA'.format(ma_period), color='orange')
         plt.title('Bitcoin Weekly Close Price and SMA')
         plt.legend()
 
@@ -536,19 +521,26 @@ class MarketData:
         plt.plot(df.index, df['rate'], label='Deviation Rate', color='purple')
         plt.plot(df.index, df['plusDev'], label='Plus Deviation', color='green')
         plt.plot(df.index, df['minusDev'], label='Minus Deviation', color='red')
-        plt.plot(df.index, list(collinear_line.values()), label='Collinear Line', color='cyan')
-        plt.title('Deviation Rate with Plus and Minus Deviation Lines')
+        plt.title('Moving Average Deviation Rate with Plus and Minus Deviation Lines')
         plt.legend()
 
         plt.tight_layout()
-    
+
         buffer = io.BytesIO()
         plt.savefig(buffer, format='png')
         buffer.seek(0)
         plt.close()
         photo_data = buffer.getvalue()
 
-        return photo_data, difference
+        latest_date = df.index[-1]
+        latest_deviation_rate = df.loc[latest_date, 'rate']
+        latest_plus_dev = df.loc[latest_date, 'plusDev']
+        latest_minus_dev = df.loc[latest_date, 'minusDev']
+
+        summary = "Latest Deviation Rate: {:.2f}%\nPlus Deviation: {:.2f}%\nMinus Deviation: {:.2f}%".format(
+            latest_deviation_rate, latest_plus_dev, latest_minus_dev)
+
+        return photo_data, summary
     
     def smi_indicator(self):
     
@@ -1697,6 +1689,133 @@ class MarketData:
         plt.close()
 
         return buf, cross_info
+    
+
+
+    def analyze_btc_divergences(self, ticker, interval):
+      
+        today = datetime.today()
+        if interval == '1d':
+            start_date = today - timedelta(days=365)
+        elif interval == '1wk':
+            start_date = today - timedelta(days=365 * 1.5)
+        elif interval == '4h':
+            start_date = today - timedelta(days=30)
+        else:
+            raise ValueError('Unsupported interval. Choose from "1d", "1wk", "4h".')
+
+        if interval == '4h':
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval='1h')
+            data = data.resample('4h').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+        else:
+            data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=None, interval=interval)
+
+        # Calculate RSI
+        rsi_period = 14
+        rsi_indicator = RSIIndicator(close=data['Close'], window=rsi_period)
+        data['RSI'] = rsi_indicator.rsi()
+
+        lbR = lbL = 5
+        rangeUpper, rangeLower = 60, 5
+
+        def find_pivot_points(series, left, right):
+            pivots = pd.Series(np.nan, index=series.index)
+            for i in range(left, len(series) - right):
+                if all(series.iloc[i-left:i] < series.iloc[i]) and all(series.iloc[i+1:i+right+1] < series.iloc[i]):
+                    pivots.iloc[i] = 1  # High pivot
+                elif all(series.iloc[i-left:i] > series.iloc[i]) and all(series.iloc[i+1:i+right+1] > series.iloc[i]):
+                    pivots.iloc[i] = -1  # Low pivot
+            return pivots
+
+        def detect_divergences(price, rsi, pivots):
+            divergences = {
+                'bullish': [], 'bearish': [],
+                'hidden_bullish': [], 'hidden_bearish': []
+            }
+
+            for i in range(rangeUpper, len(price)):
+                if pivots.iloc[i] == -1 or (i > 0 and price.iloc[i] < price.iloc[i-1] and rsi.iloc[i] > rsi.iloc[i-1]):
+                    j = i - 1
+                    while j >= 0 and (pivots.iloc[j] != -1 and price.iloc[j] >= price.iloc[i]):
+                        j -= 1
+                    if j >= 0 and rangeLower <= i - j <= rangeUpper:
+                        if price.iloc[i] < price.iloc[j] and rsi.iloc[i] > rsi.iloc[j]:
+                            divergences['bullish'].append((j, i))
+                        elif price.iloc[i] > price.iloc[j] and rsi.iloc[i] < rsi.iloc[j]:
+                            divergences['hidden_bullish'].append((j, i))
+                elif pivots.iloc[i] == 1 or (i > 0 and price.iloc[i] > price.iloc[i-1] and rsi.iloc[i] < rsi.iloc[i-1]):
+                    j = i - 1
+                    while j >= 0 and (pivots.iloc[j] != 1 and price.iloc[j] <= price.iloc[i]):
+                        j -= 1
+                    if j >= 0 and rangeLower <= i - j <= rangeUpper:
+                        if price.iloc[i] > price.iloc[j] and rsi.iloc[i] < rsi.iloc[j]:
+                            divergences['bearish'].append((j, i))
+                        elif price.iloc[i] < price.iloc[j] and rsi.iloc[i] > rsi.iloc[j]:
+                            divergences['hidden_bearish'].append((j, i))
+
+            return divergences
+
+        price_pivots = find_pivot_points(data['Close'], lbL, lbR)
+        divergences = detect_divergences(data['Close'], data['RSI'], price_pivots)
+
+        last_day_divergence = None
+        for div_type, div_list in divergences.items():
+            if div_list and div_list[-1][1] == len(data) - 1:
+                last_day_divergence = div_type
+                break
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12), sharex=True)
+        fig.suptitle(f'{ticker} Price and RSI with Divergences ({interval})')
+
+        ax1.plot(data.index, data['Close'], label=f'{ticker} Price', color='black')
+        ax1.set_ylabel('Price (USD)')
+        ax1.legend()
+        ax1.grid(True)
+
+        ax2.plot(data.index, data['RSI'], label='RSI', color='orange')
+        ax2.axhline(y=70, color='red', linestyle='--')
+        ax2.axhline(y=30, color='green', linestyle='--')
+        ax2.set_ylabel('RSI')
+        ax2.set_ylim(0, 100)
+        ax2.legend()
+        ax2.grid(True)
+
+        def plot_divergence(start, end, color, label, linestyle='-'):
+            ax1.plot(data.index[[start, end]], data['Close'].iloc[[start, end]], color=color, linestyle=linestyle)
+            ax2.plot(data.index[[start, end]], data['RSI'].iloc[[start, end]], color=color, linestyle=linestyle)
+            ax1.plot(data.index[end], data['Close'].iloc[end], color=color, marker='o', markersize=10)
+            ax2.plot(data.index[end], data['RSI'].iloc[end], color=color, marker='o', markersize=10)
+            ax1.annotate(label, (data.index[end], data['Close'].iloc[end]), xytext=(10, 10), 
+                        textcoords='offset points', color=color)
+
+        for start, end in divergences['bullish']:
+            plot_divergence(start, end, 'green', 'Bull')
+        for start, end in divergences['bearish']:
+            plot_divergence(start, end, 'red', 'Bear')
+        for start, end in divergences['hidden_bullish']:
+            plot_divergence(start, end, 'green', 'H Bull', '--')
+        for start, end in divergences['hidden_bearish']:
+            plot_divergence(start, end, 'red', 'H Bear', '--')
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+
+        print(f"Number of Bullish Divergences: {len(divergences['bullish'])}")
+        print(f"Number of Bearish Divergences: {len(divergences['bearish'])}")
+        print(f"Number of Hidden Bullish Divergences: {len(divergences['hidden_bullish'])}")
+        print(f"Number of Hidden Bearish Divergences: {len(divergences['hidden_bearish'])}")
+        print(f"Divergence on the last day: {last_day_divergence if last_day_divergence else 'None'}")
+
+        return buf, last_day_divergence
 
 
 class Bot:
@@ -1712,7 +1831,10 @@ class Bot:
         if not fetch_symbols:
             self.tickers = [symbol + '-USD' for symbol in self.market_data.symbols]
             fetch_symbols = True
+            self.tickers2 = [symbol2 + '-USD' for symbol2 in self.market_data.symbols2]
+            fetch_symbols2 = True
         self.last_signal = {ticker: {'signal': None, 'date': None} for ticker in self.tickers}
+        self.last_signal2 = {ticker2: {'signal': None, 'date': None} for ticker2 in self.tickers2}
         
         
 
@@ -1731,6 +1853,16 @@ class Bot:
         self.bearish_engulf_action = False
         self.bullish_engulf_action = False
         self.fibrsi = False
+
+        self.last_signal_direction = {}
+        self.last_signal_time = {}
+        self.confirmation_count = {}
+        self.threshold = 0.01  # 1% threshold
+        self.confirmation_period = 2  # 2 intervals for confirmation
+        self.volume_increase_threshold = 1.5  # 50% volume increase
+
+        self.last_divergence = {}
+        
         
  
         @self.bot.message_handler(commands=['start'])
@@ -1848,6 +1980,10 @@ class Bot:
         @self.bot.message_handler(commands=['3w_rsi'])
         async def handle_3wrsi(message):
             await self.process_3wrsi(message)
+
+        @self.bot.message_handler(commands=['divergence'])
+        async def handle_divergence(message):
+            await self.process_divergence(message)
 
         @self.bot.message_handler(func=lambda message: True)
         async def handle_unknown(message):
@@ -1971,12 +2107,13 @@ class Bot:
 
     async def process_madr(self, message):
         chat_id = message.chat.id
-        photo_data, difference = self.market_data.fetch_madr()
+        photo_data, summary = self.market_data.fetch_madr()
         if photo_data:
             await self.bot.send_photo(chat_id=chat_id, photo=photo_data)
-            await self.bot.send_message(chat_id=chat_id, text=f"The difference between madr and the latest price is: {difference:.1f}")
+            await self.bot.send_message(chat_id=chat_id, text=summary)
         else:
             await self.bot.send_message(chat_id=chat_id, text="Sorry, I couldn't generate the Moving Average Deviation Rate plot.")
+
 
     async def process_smi(self, message):
         chat_id = message.chat.id
@@ -2235,11 +2372,32 @@ class Bot:
 
     async def process_3wrsi(self, message):
         chat_id = message.chat.id
+        interval = '1d'
+
         try:
             buf, cross_info = self.market_data.plot_rsi_fib_cross()
             await self.bot.send_photo(chat_id=chat_id, photo=buf)
         except ValueError as e:
             await self.bot.send_message(chat_id=chat_id, text=f"Sorry, I couldn't generate the 3w rsi") 
+
+    async def process_divergence(self, message):
+        chat_id = message.chat.id
+        text = message.text.split()
+        interval ='1d'
+        symbol = text[1].upper() + '-USD' if len(text) > 1 else 'BTC-USD'
+        if not symbol.upper().endswith('-USD'):
+            symbol = f"{symbol.upper()}-USD"
+        
+        if len(text) > 2:
+            interval = text[2].lower()
+        if interval not in ['1d', '4h', '1wk']:
+            await self.bot.send_message(chat_id=chat_id, text="Invalid interval. Please use '1d', '4h', or '1w'.")
+
+        try: 
+            buf, divstyle = self.market_data.analyze_btc_divergences(symbol, interval)
+            await self.bot.send_photo(chat_id=chat_id, photo=buf)
+        except ValueError as e:
+            await self.bot.send_message(chat_id=chat_id, text = f"Sorry, I couldn't generate the divergences")
 
     async def process_everything(self, message):
         chat_id = message.chat.id
@@ -2272,10 +2430,11 @@ class Bot:
         await self.process_supertrend(mock_message)  
         await self.process_emas(mock_message)  
         await self.process_3wrsi(mock_message)
+        await self.process_divergence(mock_message)
             
     ######################################################################################################################################
     async def periodic_task(self):
-        await self.some_function()
+        #await self.some_function()
         while True:
             await asyncio.sleep(1800)  # Sleep for 30 minutes
             await self.some_function()
@@ -2317,6 +2476,7 @@ class Bot:
                         await self.process_supertrend(mock_message)   
                         await self.process_emas(mock_message)   
                         await self.process_3wrsi(mock_message)  
+                        await self.process_divergence(mock_message)
                         print('weekly shit')       
                     self.check=False       
             else:
@@ -2473,56 +2633,84 @@ class Bot:
                 for chat_id in chat_ids:
                     print(f"Error processing sma crossover{ticker}: {e}")
 
-        for ticker in self.tickers[0:1]:
+        for ticker2 in self.tickers2:
             try:
-                photo, signal, signal_date = self.market_data.plot_sma_crossovers(ticker)
+                photo, signal, signal_date = self.market_data.plot_sma_crossovers(ticker2)
                 if signal in ['Buy', 'Sell']:
                     if signal_date is not None:
                         today = datetime.now().date()
                         
                         if (today - signal_date.date()).days <= 5:
-                            last_signal_info = self.last_signal.get(ticker, {'signal': None, 'date': None})
+                            last_signal_info = self.last_signal.get(ticker2, {'signal': None, 'date': None})
                             if signal != last_signal_info['signal'] or last_signal_info['date'] != signal_date.date():
-                                self.last_signal[ticker] = {'signal': signal, 'date': signal_date.date()}
+                                self.last_signal[ticker2] = {'signal': signal, 'date': signal_date.date()}
                                 
                                 if signal == 'Buy':
                                     self.take_buy_action = True
                                     
-                                    await self.bot.send_message(chat_id=second_id, text=f'Buy signal {ticker} given on SMA crossover')
-                                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=second_id), text=ticker)
+                                    await self.bot.send_message(chat_id=second_id, text=f'Buy signal {ticker2} given on SMA crossover')
+                                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=second_id), text=ticker2)
                                     await self.process_sma_crossover(mock_message, chat_id)
                                 elif signal == 'Sell':
                                     self.take_sell_action = True
                                     
-                                    await self.bot.send_message(chat_id=second_id, text=f'Sell signal {ticker} given on SMA crossover')
-                                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=second_id), text=ticker)
+                                    await self.bot.send_message(chat_id=second_id, text=f'Sell signal {ticker2} given on SMA crossover')
+                                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=second_id), text=ticker2)
                                     await self.process_sma_crossover(mock_message, chat_id)
             except Exception as e:
                 for chat_id in chat_ids:
-                    print(f"Error processing sma crossover{ticker}: {e}")   
+                    print(f"Error processing sma crossover{ticker2}: {e}")   
 
         for ticker in self.tickers[0:9]:
-            try:
-                interval = '4h'
-                photo1, upwards, downwards  = self.market_data.calculate_emas(ticker, interval)
+            for ticker in self.tickers[0:9]:
+                try:
+                    interval = '4h'
+                    photo1, upwards, downwards = self.market_data.calculate_emas(ticker, interval)
 
-                if upwards and not self.ema_buy_action:
-                    await self.bot.send_message(chat_id=master_id, text=f'Upwards trend detected on {ticker}')
-                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
-                    #await self.process_emas(mock_message, chat_id)
-                    self.ema_buy_action = True
-                    self.ema_sell_action = False
+                    # We don't have access to the data directly, so we'll use the upwards and downwards signals
+                    # along with the confirmation count to determine trends
 
-                elif downwards and not self.ema_sell_action:
-                    await self.bot.send_message(chat_id=master_id, text=f'Downwards trend detected on {ticker}')
-                    mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
-                    #await self.process_emas(mock_message, chat_id)
-                    self.ema_sell_action = True
-                    self.ema_buy_action = False
-                
-            except Exception as e:
-                    for chat_id in chat_ids:
-                        print(f"Error processing ema crossover{ticker}: {e}")     
+                    # Update confirmation count
+                    if ticker not in self.confirmation_count:
+                        self.confirmation_count[ticker] = 0
+
+                    if upwards:
+                        self.confirmation_count[ticker] += 1
+                    elif downwards:
+                        self.confirmation_count[ticker] -= 1
+                    else:
+                        self.confirmation_count[ticker] = 0
+
+                    # Check if we have a new confirmed signal
+                    new_signal = False
+                    if abs(self.confirmation_count[ticker]) >= self.confirmation_period:
+                        if self.confirmation_count[ticker] > 0 and (ticker not in self.last_signal_direction or self.last_signal_direction[ticker] != "up"):
+                            new_signal = True
+                            signal_direction = "up"
+                        elif self.confirmation_count[ticker] < 0 and (ticker not in self.last_signal_direction or self.last_signal_direction[ticker] != "down"):
+                            new_signal = True
+                            signal_direction = "down"
+
+                    if new_signal:
+                        # Check cooldown (6 hours)
+                        current_time = datetime.now()
+                        if ticker not in self.last_signal_time or (current_time - self.last_signal_time[ticker]) > timedelta(hours=6):
+                            if signal_direction == "up":
+                                await self.bot.send_message(chat_id=master_id, text=f'Upwards trend detected on {ticker}')
+                                mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
+                                #await self.process_emas(mock_message, chat_id)  
+                            else:
+                                await self.bot.send_message(chat_id=master_id, text=f'Downwards trend detected on {ticker}')
+
+                            mock_message = SimpleNamespace(chat=SimpleNamespace(id=master_id), text=ticker)
+                            #await self.process_emas(mock_message, chat_id)
+                            self.last_signal_direction[ticker] = signal_direction
+                            self.last_signal_time[ticker] = current_time
+                            self.confirmation_count[ticker] = 0
+
+                except Exception as e:
+                    await self.bot.send_message(chat_id=master_id, text=f"Error processing ema crossover {ticker}: {e}")
+                    print(f"Error processing ema crossover {ticker}: {e}") 
 
 
         for ticker in self.tickers[0:9]:
@@ -2573,6 +2761,48 @@ class Bot:
         except Exception as e:
                 for chat_id in chat_ids:
                     print(f"Error processing 3w rsi {ticker}: {e}")   
+
+
+        for ticker in self.tickers[0:11]:
+          try:
+              for interval in ['1d', '1wk', '4h']:
+                  photo, last_day_divergence = self.market_data.analyze_btc_divergences(ticker, interval)
+                  if last_day_divergence:
+                      today = datetime.now().date()
+                      last_divergence_info = self.last_divergence.get(ticker, {}).get(interval, {'type': None, 'date': None})
+                      
+                      if last_day_divergence != last_divergence_info['type'] or last_divergence_info['date'] != today:
+                          self.last_divergence.setdefault(ticker, {})[interval] = {'type': last_day_divergence, 'date': today}
+                          
+                          message = f"Divergence detected for {ticker} on {interval} timeframe: {last_day_divergence}"
+                          await self.bot.send_message(chat_id=self.master_id, text=message)
+                          
+                          # Send the chart
+                          await self.bot.send_photo(chat_id=self.master_id, photo=photo)
+                          
+                          # Process bullish and bearish divergences
+                          if 'bullish' in last_day_divergence:
+                              action_message = f"Bullish divergence detected for {ticker} on {interval} timeframe. Consider taking a long position."
+                              await self.bot.send_message(chat_id=self.master_id, text=action_message)
+                              
+                              # Add your specific logic for bullish divergence here
+                              # For example:
+                              # await self.place_buy_order(ticker)
+                              # or
+                              # self.update_trading_strategy(ticker, 'bullish')
+                              
+                          elif 'bearish' in last_day_divergence:
+                              action_message = f"Bearish divergence detected for {ticker} on {interval} timeframe. Consider taking a short position or closing longs."
+                              await self.bot.send_message(chat_id=self.master_id, text=action_message)
+                              
+                              # Add your specific logic for bearish divergence here
+                              # For example:
+                              # await self.place_sell_order(ticker)
+                              # or
+                              # self.update_trading_strategy(ticker, 'bearish')
+          
+          except Exception as e:
+              print(f"Error processing divergences for {ticker}: {e}")
 
     async def start_polling(self):
         try:
